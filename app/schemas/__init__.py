@@ -62,3 +62,9 @@ class JudgeIn(BaseModel):
 class ScoreIn(BaseModel):
     bid_document_id: int
     scores: dict[str, float]
+
+
+class ClarifyIn(BaseModel):
+    bid_document_id: int
+    action: str  # accept（澄清通过）/ exclude（排除投标）
+    reason: str = ""

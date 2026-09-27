@@ -300,3 +300,175 @@ def test_lowest_price_winner_not_abnormal_low_bid(db):
     data = r.json()
     assert 300_000 in data["abnormal_prices"], "300000 应被判定为异常低价"
     assert data["winner_bid_id"] != abnormal.id, "异常低价投标需澄清，不应直接中标"
+
+
+def _api_client():
+    transport = httpx.ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+
+async def _login(ac, username):
+    r = await ac.post("/api/auth/login", json={"username": username, "password": "123456"})
+    assert r.status_code == 200
+
+
+def _lowest_price_section(db, code, username):
+    admin = _user(db, username, role="admin")
+    project = _project(db, code=code)
+    section = _section(db, project, method="lowest_price", status="evaluating")
+    db.add(EvaluationRule(section_id=section.id, method="lowest_price", abnormal_price_ratio=0.6))
+    db.commit()
+    return admin, section
+
+
+def test_abnormal_low_blocks_award_chain(db):
+    """检出异常低价后：不生成中标记录、不启动公示、标段保持评标中、投标转待澄清。"""
+    _, section = _lowest_price_section(db, "ZB-T-003", "admin_ab")
+    bidder_a = _user(db, "bidder_ab1")
+    bidder_b = _user(db, "bidder_ab2")
+    bidder_c = _user(db, "bidder_ab3")
+    _bid(db, section, bidder_a, 1_000_000)
+    _bid(db, section, bidder_b, 1_000_000)
+    abnormal = _bid(db, section, bidder_c, 300_000)
+
+    async def _run():
+        async with _api_client() as ac:
+            await _login(ac, "admin_ab")
+            return await ac.post(f"/api/sections/{section.id}/evaluation/open")
+
+    r = asyncio.run(_run())
+    assert r.status_code == 200
+    data = r.json()
+    assert data["winner_bid_id"] is None, "待澄清期间不得产生中标候选人"
+    assert data["publish_end"] is None, "待澄清期间不得启动中标公示"
+    assert [c["bid_document_id"] for c in data["pending_clarification"]] == [abnormal.id]
+    db.expire_all()
+    assert db.get(BidDocument, abnormal.id).status == "clarifying"
+    assert db.get(TenderSection, section.id).status == "evaluating", "待澄清期间标段应保持评标中"
+    assert db.query(Winner).filter(Winner.section_id == section.id).first() is None, "待澄清期间不得生成中标记录"
+
+
+def test_reopen_blocked_while_clarification_pending(db):
+    """存在待澄清投标时，再次开标应被拒绝，防止绕过澄清直接定标。"""
+    _, section = _lowest_price_section(db, "ZB-T-004", "admin_bl")
+    _bid(db, section, _user(db, "bidder_bl1"), 1_000_000)
+    _bid(db, section, _user(db, "bidder_bl2"), 1_000_000)
+    _bid(db, section, _user(db, "bidder_bl3"), 300_000)
+
+    async def _run():
+        async with _api_client() as ac:
+            await _login(ac, "admin_bl")
+            await ac.post(f"/api/sections/{section.id}/evaluation/open")
+            return await ac.post(f"/api/sections/{section.id}/evaluation/open")
+
+    r = asyncio.run(_run())
+    assert r.status_code == 400
+    assert "澄清" in r.json()["detail"]
+
+
+def test_exclude_abnormal_bid_returns_deposit_and_awards_next(db):
+    """排除异常低价投标：退还其保证金，重新开标由最低有效报价中标并进入公示。"""
+    _, section = _lowest_price_section(db, "ZB-T-005", "admin_ex")
+    bidder_a = _user(db, "bidder_ex1")
+    bidder_b = _user(db, "bidder_ex2")
+    bidder_c = _user(db, "bidder_ex3")
+    normal_1 = _bid(db, section, bidder_a, 1_000_000)
+    _bid(db, section, bidder_b, 1_100_000)
+    abnormal = _bid(db, section, bidder_c, 300_000)
+    account = EscrowAccount(section_id=section.id, bid_document_id=abnormal.id, bidder_id=bidder_c.id, amount=20_000, status="unpaid")
+    db.add(account)
+    db.commit()
+    pay_deposit(db, account)
+
+    async def _run():
+        async with _api_client() as ac:
+            await _login(ac, "admin_ex")
+            await ac.post(f"/api/sections/{section.id}/evaluation/open")
+            clarify = await ac.post(
+                f"/api/sections/{section.id}/evaluation/clarify",
+                json={"bid_document_id": abnormal.id, "action": "exclude", "reason": "报价低于成本，澄清不成立"},
+            )
+            reopen = await ac.post(f"/api/sections/{section.id}/evaluation/open")
+            re_open_again = await ac.post(f"/api/sections/{section.id}/evaluation/open")
+            return clarify, reopen, re_open_again
+
+    clarify, reopen, re_open_again = asyncio.run(_run())
+    assert clarify.status_code == 200
+    assert clarify.json()["status"] == "excluded"
+    assert clarify.json()["remaining_clarifications"] == 0
+    db.expire_all()
+    assert db.get(BidDocument, abnormal.id).status == "excluded"
+    assert db.get(EscrowAccount, account.id).status == "returned", "被排除投标的保证金应联动退还"
+
+    assert reopen.status_code == 200
+    data = reopen.json()
+    assert data["winner_bid_id"] == normal_1.id, "排除异常低价后应由最低有效报价中标"
+    assert data["publish_end"] is not None, "定标后应启动中标公示"
+    assert all(r["bid_document_id"] != abnormal.id for r in data["ranked"]), "被排除投标不应出现在评标排名中"
+    assert db.get(TenderSection, section.id).status == "awarded"
+    winner = db.query(Winner).filter(Winner.section_id == section.id).first()
+    assert winner is not None and winner.bid_document_id == normal_1.id
+
+    assert re_open_again.status_code == 400, "已定标标段不得重复开标"
+
+
+def test_accept_clarification_allows_bid_to_win(db):
+    """澄清通过后投标恢复有效，不再重复判异常，可正常中标。"""
+    _, section = _lowest_price_section(db, "ZB-T-006", "admin_ac")
+    _bid(db, section, _user(db, "bidder_ac1"), 1_000_000)
+    _bid(db, section, _user(db, "bidder_ac2"), 1_000_000)
+    abnormal = _bid(db, section, _user(db, "bidder_ac3"), 300_000)
+
+    async def _run():
+        async with _api_client() as ac:
+            await _login(ac, "admin_ac")
+            await ac.post(f"/api/sections/{section.id}/evaluation/open")
+            clarify = await ac.post(
+                f"/api/sections/{section.id}/evaluation/clarify",
+                json={"bid_document_id": abnormal.id, "action": "accept", "reason": "成本构成说明合理"},
+            )
+            reopen = await ac.post(f"/api/sections/{section.id}/evaluation/open")
+            return clarify, reopen
+
+    clarify, reopen = asyncio.run(_run())
+    assert clarify.status_code == 200
+    assert clarify.json()["status"] == "clarified"
+    db.expire_all()
+    assert db.get(BidDocument, abnormal.id).status == "clarified"
+
+    assert reopen.status_code == 200
+    data = reopen.json()
+    assert data["abnormal_prices"] == [], "澄清通过的投标不应再被判异常"
+    assert data["winner_bid_id"] == abnormal.id, "澄清通过后最低报价应正常中标"
+    assert db.get(TenderSection, section.id).status == "awarded"
+
+
+def test_clarify_rejects_invalid_action_and_state(db):
+    """澄清接口校验：非待澄清投标 / 非法动作应返回 400。"""
+    _, section = _lowest_price_section(db, "ZB-T-007", "admin_iv")
+    _bid(db, section, _user(db, "bidder_iv1"), 1_000_000)
+    _bid(db, section, _user(db, "bidder_iv2"), 1_000_000)
+    abnormal = _bid(db, section, _user(db, "bidder_iv3"), 300_000)
+
+    async def _run():
+        async with _api_client() as ac:
+            await _login(ac, "admin_iv")
+            bad_action = await ac.post(
+                f"/api/sections/{section.id}/evaluation/clarify",
+                json={"bid_document_id": abnormal.id, "action": "ignore"},
+            )
+            await ac.post(f"/api/sections/{section.id}/evaluation/open")
+            ok = await ac.post(
+                f"/api/sections/{section.id}/evaluation/clarify",
+                json={"bid_document_id": abnormal.id, "action": "exclude"},
+            )
+            repeat = await ac.post(
+                f"/api/sections/{section.id}/evaluation/clarify",
+                json={"bid_document_id": abnormal.id, "action": "accept"},
+            )
+            return bad_action, ok, repeat
+
+    bad_action, ok, repeat = asyncio.run(_run())
+    assert bad_action.status_code == 400
+    assert ok.status_code == 200
+    assert repeat.status_code == 400, "已处理的投标不得重复澄清"
