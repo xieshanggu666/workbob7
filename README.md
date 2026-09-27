@@ -9,7 +9,7 @@
 - **投标管理**：投标文件提交、报价、证照有效期、技术方案，自动合规校验（必填/日期/范围规则）
 - **评标引擎**：
   - 综合评分法：价格分（最低价基准）+ 技术/商务主观分（评委打分、加权）
-  - 最低价法：合规通过中最低报价中标，异常低价检测（低于平均价阈值需澄清）
+  - 最低价法：合规通过中最低报价中标；异常低价自动发起澄清，澄清期间不得排名、定标或公示；澄清成立才恢复有效，澄清不成立或逾期则排除并退还保证金
 - **中标公示**：公示期管理、到期确认中标
 - **保证金账务**：缴纳、退还、没收，完整资金流水
 - **审计日志**：全操作留痕
@@ -52,7 +52,7 @@ bid_system/
 ├── app/
 │   ├── main.py            # 应用入口，托管前端静态资源与 API
 │   ├── core/              # 配置 / 数据库 / 安全 / 依赖
-│   ├── models/            # 16 张数据表
+│   ├── models/            # 17 张数据表
 │   ├── schemas/           # Pydantic 校验模型
 │   ├── services/          # 业务逻辑（合规校验 / 评标引擎 / 保证金 / 状态机）
 │   └── api/               # REST 接口
@@ -78,7 +78,10 @@ bid_system/
 | POST | /api/sections/{id}/transition | 状态流转 |
 | POST | /api/sections/{id}/bids | 提交投标（自动合规校验） |
 | GET | /api/sections/{id}/evaluation | 评标配置 |
-| POST | /api/sections/{id}/evaluation/open | 开标（算分/排名/异常低价/中标候选人） |
+| POST | /api/sections/{id}/evaluation/open | 开标（算分/排名/异常低价澄清/中标候选人） |
+| GET | /api/sections/{id}/evaluation/clarifications | 查询异常低价澄清记录 |
+| POST | /api/clarifications/{id}/response | 投标人提交异常低价澄清说明 |
+| POST | /api/clarifications/{id}/review | 审核澄清：成立恢复有效 / 不成立排除报价 |
 | POST | /api/escrow/{id}/return | 退还保证金 |
 | GET | /api/dashboard | 统计总览 |
 | GET | /api/audit | 审计日志 |

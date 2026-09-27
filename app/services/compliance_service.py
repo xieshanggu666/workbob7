@@ -34,7 +34,7 @@ def check_bid_document(db, section_id: int, bid_doc) -> dict:
             # 校验证照有效期：过期即不满足要求
             if expiry is None:
                 errors.append(rule.message or f"{rule.field} 日期格式无效")
-            elif expiry <= today:
+            elif expiry < today:
                 errors.append(rule.message or f"{rule.field} 已过期")
         elif rule.rule_type == "range":
             try:

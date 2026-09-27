@@ -61,7 +61,21 @@ const SectionView = {
       <p v-if="!bids.length" class="muted">暂无投标</p>
     </div>
 
-    <div class="card" v-if="s.winner">
+    <div class="card" v-if="clarifications.length">
+      <h2>异常低价澄清</h2>
+      <table>
+        <thead><tr><th>投标</th><th>报价</th><th>状态</th><th>截止时间</th><th>处理意见</th></tr></thead>
+        <tbody>
+          <tr v-for="c in clarifications" :key="c.id">
+            <td>{{ companyOfBid(c.bid_document_id) }}</td><td>¥{{ fmt(c.suspected_price) }}</td>
+            <td v-html="StatusBadge(c.status)"></td><td>{{ fmtDate(c.deadline) }}</td>
+            <td>{{ c.review_remark || (c.response_content ? '已提交说明，待审核' : '等待投标人澄清') }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" v-if="s.winner && s.winner.status !== 'cancelled'">
       <h2>中标公示</h2>
       <div class="flex wrap">
         <span class="chip">中标价：¥{{ fmt(s.winner.win_price) }}</span>
@@ -74,7 +88,7 @@ const SectionView = {
   props: { route: Object },
   data() {
     return {
-      s: {}, bids: [], statusLogs: [], user: null, lastCompliance: null,
+      s: {}, bids: [], statusLogs: [], user: null, lastCompliance: null, clarifications: [],
       ann: { title: "", content: "" },
       bidForm: { price: null, license_expiry: "", tech_material: "" },
     };
@@ -87,7 +101,7 @@ const SectionView = {
   methods: {
     async load() {
       const res = await Api.get(`/api/sections/${this.route.params.id}`);
-      this.s = res; this.bids = res.bids; this.statusLogs = res.status_logs;
+      this.s = res; this.bids = res.bids; this.statusLogs = res.status_logs; this.clarifications = res.clarifications || [];
       try { this.user = (await Api.get("/api/auth/me")); } catch (e) { /* ignore */ }
     },
     async transition(to) {
@@ -119,6 +133,10 @@ const SectionView = {
         alert(res.ok ? "中标已确认" : res.message);
         await this.load();
       } catch (e) { alert(e.message); }
+    },
+    companyOfBid(id) {
+      const bid = this.bids.find(b => b.id === id);
+      return bid ? bid.company : `投标 ${id}`;
     },
     fmt(n) { return Number(n || 0).toLocaleString("zh-CN", { minimumFractionDigits: 2 }); },
     fmtDate(d) { return d ? String(d).replace("T", " ").slice(0, 16) : "-"; },

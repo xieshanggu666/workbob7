@@ -79,6 +79,7 @@ def recheck_bid(bid_id: int, db: Session = Depends(get_db), user: User = Depends
         raise HTTPException(status_code=404, detail="投标文件不存在")
     result = check_bid_document(db, bid.section_id, bid)
     bid.compliance_json = json.dumps(result)
-    bid.status = "qualified" if result["passed"] else "submitted"
+    if bid.status not in {"clarifying", "abn_excluded"}:
+        bid.status = "qualified" if result["passed"] else "submitted"
     db.commit()
     return {"id": bid.id, "compliance": result}

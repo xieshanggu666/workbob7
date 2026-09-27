@@ -62,3 +62,12 @@ class JudgeIn(BaseModel):
 class ScoreIn(BaseModel):
     bid_document_id: int
     scores: dict[str, float]
+
+
+class ClarificationResponseIn(BaseModel):
+    content: str = Field(min_length=1)
+
+
+class ClarificationReviewIn(BaseModel):
+    action: str  # accepted / excluded
+    remark: str = ""

@@ -26,6 +26,8 @@ window.StatusBadge = (s) => {
     failed: ["流标", "red"], closed: ["已关闭", "gray"],
     pending: ["待确认", "yellow"], confirmed: ["已确认", "green"], cancelled: ["已取消", "red"],
     qualified: ["合规通过", "green"], disqualified: ["不合规", "red"], submitted: ["已提交", "gray"],
+    clarifying: ["待澄清", "yellow"], abn_excluded: ["异常低价排除", "red"],
+    responded: ["已答复", "yellow"], accepted: ["澄清通过", "green"], excluded: ["已排除", "red"],
     won: ["中标", "green"], lost: ["未中标", "gray"],
     unpaid: ["未缴纳", "yellow"], paid: ["已缴纳", "green"], returned: ["已退还", "gray"], forfeited: ["已没收", "red"],
   };

@@ -9,6 +9,7 @@ import httpx
 from app.core.security import hash_password
 from app.main import app
 from app.models import (
+    AbnormalPriceClarification,
     BidDocument,
     ComplianceRule,
     EscrowAccount,
@@ -88,6 +89,34 @@ def _bid(db, section, bidder, price, expiry="2030-01-01", passed=True, tech="技
     db.add(bid)
     db.commit()
     return bid
+
+
+def _escrow(db, section, bid, bidder, amount=10_000, status="paid"):
+    account = EscrowAccount(
+        section_id=section.id,
+        bid_document_id=bid.id,
+        bidder_id=bidder.id,
+        amount=amount,
+        status=status,
+        paid_at=datetime.utcnow() if status in {"paid", "returned", "forfeited"} else None,
+    )
+    db.add(account)
+    db.commit()
+    return account
+
+
+async def _login_post(client, username, path, payload=None):
+    await client.post("/api/auth/login", json={"username": username, "password": "123456"})
+    return await client.post(path, json=payload or {})
+
+
+def _login_and_post(username, path, payload=None):
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await _login_post(client, username, path, payload)
+
+    return asyncio.run(_run())
 
 
 # ---------- 合规校验 ----------
@@ -273,8 +302,8 @@ def test_publicity_confirms_on_end_day(db):
 
 
 def test_lowest_price_winner_not_abnormal_low_bid(db):
-    """最低价法开标：异常低价投标应触发澄清，不得直接中标。"""
-    admin = _user(db, "admin_w", role="admin")
+    """最低价法开标：异常低价投标应触发澄清，不得直接中标或公示。"""
+    _user(db, "admin_w", role="admin")
     project = _project(db, code="ZB-T-002")
     section = _section(db, project, method="lowest_price", status="evaluating")
     rule = EvaluationRule(section_id=section.id, method="lowest_price", abnormal_price_ratio=0.6)
@@ -288,15 +317,99 @@ def test_lowest_price_winner_not_abnormal_low_bid(db):
     normal_2 = _bid(db, section, bidder_b, 1_000_000)
     abnormal = _bid(db, section, bidder_c, 300_000)
 
-    async def _run():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
-            login = await ac.post("/api/auth/login", json={"username": "admin_w", "password": "123456"})
-            assert login.status_code == 200
-            return await ac.post(f"/api/sections/{section.id}/evaluation/open")
-
-    r = asyncio.run(_run())
+    r = _login_and_post("admin_w", f"/api/sections/{section.id}/evaluation/open")
     assert r.status_code == 200
     data = r.json()
     assert 300_000 in data["abnormal_prices"], "300000 应被判定为异常低价"
-    assert data["winner_bid_id"] != abnormal.id, "异常低价投标需澄清，不应直接中标"
+    assert data["needs_clarification"] is True
+    assert data["winner_bid_id"] is None
+    assert data["awarded"] is False
+    assert data["publish_end"] is None
+    assert [row["bid_document_id"] for row in data["ranked"]] == [normal_1.id, normal_2.id]
+    db.refresh(abnormal)
+    db.refresh(section)
+    assert abnormal.status == "clarifying"
+    assert section.status == "evaluating"
+    assert db.query(Winner).filter(Winner.section_id == section.id).count() == 0
+
+
+def test_abnormal_low_response_then_exclusion_awards_next_valid_bid_and_returns_deposits(db):
+    """澄清不成立时排除异常报价，随后由下一有效报价定标并处理保证金。"""
+    _user(db, "admin_w", role="admin")
+    project = _project(db, code="ZB-T-003")
+    section = _section(db, project, method="lowest_price", status="evaluating")
+    rule = EvaluationRule(section_id=section.id, method="lowest_price", abnormal_price_ratio=0.6)
+    db.add(rule)
+    db.commit()
+    bidder_a = _user(db, "bidder_ex_a")
+    bidder_b = _user(db, "bidder_ex_b")
+    normal = _bid(db, section, bidder_a, 1_000_000)
+    abnormal = _bid(db, section, bidder_b, 300_000)
+    normal_account = _escrow(db, section, normal, bidder_a)
+    abnormal_account = _escrow(db, section, abnormal, bidder_b)
+
+    _login_and_post("admin_w", f"/api/sections/{section.id}/evaluation/open")
+    clarification = db.query(AbnormalPriceClarification).filter(AbnormalPriceClarification.bid_document_id == abnormal.id).one()
+    response = _login_and_post(
+        "bidder_ex_b",
+        f"/api/clarifications/{clarification.id}/response",
+        {"content": "报价低于成本，无法合理说明"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "responded"
+
+    review = _login_and_post(
+        "admin_w",
+        f"/api/clarifications/{clarification.id}/review",
+        {"action": "excluded", "remark": "不能证明报价可履约"},
+    )
+    assert review.status_code == 200
+    result = review.json()
+    assert result["awarded"] is True
+    assert result["winner_bid_id"] == normal.id
+    assert abnormal.id not in [row["bid_document_id"] for row in result["ranked"]]
+
+    db.refresh(abnormal)
+    db.refresh(normal)
+    db.refresh(abnormal_account)
+    db.refresh(normal_account)
+    db.refresh(section)
+    assert abnormal.status == "abn_excluded"
+    assert normal.status == "won"
+    assert abnormal_account.status == "returned"
+    assert normal_account.status == "paid"
+    assert section.status == "awarded"
+    winner = db.query(Winner).filter(Winner.section_id == section.id).one()
+    assert winner.bid_document_id == normal.id
+    assert winner.publish_end is not None
+
+
+def test_abnormal_low_accepted_can_win_after_clarification(db):
+    """澄清成立后，异常低价恢复为有效报价，才可进入排名和公示。"""
+    _user(db, "admin_w", role="admin")
+    project = _project(db, code="ZB-T-004")
+    section = _section(db, project, method="lowest_price", status="evaluating")
+    rule = EvaluationRule(section_id=section.id, method="lowest_price", abnormal_price_ratio=0.6)
+    db.add(rule)
+    db.commit()
+    normal_bidder = _user(db, "bidder_ok_a")
+    abnormal_bidder = _user(db, "bidder_ok_b")
+    normal = _bid(db, section, normal_bidder, 1_000_000)
+    abnormal = _bid(db, section, abnormal_bidder, 300_000)
+
+    _login_and_post("admin_w", f"/api/sections/{section.id}/evaluation/open")
+    clarification = db.query(AbnormalPriceClarification).filter(AbnormalPriceClarification.bid_document_id == abnormal.id).one()
+    _login_and_post("bidder_ok_b", f"/api/clarifications/{clarification.id}/response", {"content": "库存清仓且有履约承诺"})
+    review = _login_and_post(
+        "admin_w",
+        f"/api/clarifications/{clarification.id}/review",
+        {"action": "accepted", "remark": "成本构成合理"},
+    )
+    result = review.json()
+    assert result["awarded"] is True
+    assert result["winner_bid_id"] == abnormal.id
+    assert result["ranked"][0]["bid_document_id"] == abnormal.id
+    db.refresh(abnormal)
+    assert abnormal.status == "won"
+    db.refresh(normal)
+    assert normal.status == "lost"

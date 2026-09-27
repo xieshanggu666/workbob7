@@ -5,14 +5,14 @@ from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models import User
 from app.models.bid import Winner
-from app.services.status_service import confirm_expired_publicity
+from app.services.status_service import confirm_expired_publicity, winner_bid_eligible
 
 router = APIRouter(prefix="/api", tags=["winner"])
 
 
 @router.get("/winners/pending")
 def pending_winners(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    winners = db.query(Winner).filter(Winner.status == "pending").all()
+    winners = [w for w in db.query(Winner).filter(Winner.status == "pending").all() if winner_bid_eligible(db, w)]
     return [
         {
             "id": w.id,

@@ -52,6 +52,28 @@ class BidScore(Base):
     section_id = Column(Integer, ForeignKey("tender_sections.id"), nullable=False, index=True)
     bid_document_id = Column(Integer, ForeignKey("bid_documents.id"), nullable=False, index=True)
     judge_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    scores_json = Column(Text, nullable=False, default="{}")   # {"item_id": score}
+    scores_json = Column(Text, nullable=False, default="{}")
     total_score = Column(Numeric(8, 2), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class AbnormalPriceClarification(Base):
+    """异常低价澄清记录。"""
+
+    __tablename__ = "abnormal_price_clarifications"
+
+    id = Column(Integer, primary_key=True)
+    section_id = Column(Integer, ForeignKey("tender_sections.id"), nullable=False, index=True)
+    bid_document_id = Column(Integer, ForeignKey("bid_documents.id"), nullable=False, index=True)
+    bidder_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    suspected_price = Column(Numeric(18, 2), nullable=False)
+    threshold_price = Column(Numeric(18, 2), nullable=False)
+    status = Column(String(16), nullable=False, default="pending")  # pending/responded/accepted/excluded
+    request_remark = Column(String(256), nullable=False, default="")
+    response_content = Column(Text, nullable=False, default="")
+    response_at = Column(DateTime, nullable=True)
+    review_remark = Column(String(256), nullable=False, default="")
+    reviewed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    deadline = Column(DateTime, nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

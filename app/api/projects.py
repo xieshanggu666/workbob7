@@ -8,6 +8,7 @@ from app.core.deps import get_current_user, require_roles
 from app.models import Announcement, Project, TenderSection, TenderStatusLog, User
 from app.schemas import AnnouncementIn, ProjectIn, SectionIn, TransitionIn
 from app.services.audit_service import add_audit
+from app.services.escrow_service import return_section_deposits
 from app.services.status_service import transition
 
 router = APIRouter(prefix="/api", tags=["projects"])
@@ -102,6 +103,8 @@ def section_transition(
         raise HTTPException(status_code=404, detail="标段不存在")
     if not transition(db, section, data.to_status, user.id, data.remark):
         raise HTTPException(status_code=400, detail=f"不允许从 {section.status} 流转到 {data.to_status}")
+    if data.to_status == "failed":
+        return_section_deposits(db, section.id, "标段流标，保证金退还")
     add_audit(db, user.id, "SECTION_TRANSITION", f"标段 {section.code} {section.status}→{data.to_status}")
     return _section_dict(section)
 
@@ -156,12 +159,18 @@ def _section_dict(s: TenderSection) -> dict:
 
 
 def _section_detail(db: Session, s: TenderSection) -> dict:
-    from app.models import BidDocument, EscrowAccount, TenderJudge, Winner
+    from app.models import AbnormalPriceClarification, BidDocument, EscrowAccount, TenderJudge, Winner
 
     bids = db.query(BidDocument).filter(BidDocument.section_id == s.id).all()
     escrows = db.query(EscrowAccount).filter(EscrowAccount.section_id == s.id).all()
     judges = db.query(TenderJudge).filter(TenderJudge.section_id == s.id).all()
-    winner = db.query(Winner).filter(Winner.section_id == s.id).first()
+    clarifications = db.query(AbnormalPriceClarification).filter(AbnormalPriceClarification.section_id == s.id).order_by(AbnormalPriceClarification.created_at.asc()).all()
+    winner = (
+        db.query(Winner)
+        .filter(Winner.section_id == s.id, Winner.status != "cancelled")
+        .order_by(Winner.created_at.desc())
+        .first()
+    )
     logs = db.query(TenderStatusLog).filter(TenderStatusLog.section_id == s.id).order_by(TenderStatusLog.created_at.asc()).all()
     return {
         **_section_dict(s),
@@ -183,6 +192,22 @@ def _section_detail(db: Session, s: TenderSection) -> dict:
             for e in escrows
         ],
         "judges": [{"id": j.id, "user_id": j.user_id} for j in judges],
+        "clarifications": [
+            {
+                "id": c.id,
+                "bid_document_id": c.bid_document_id,
+                "bidder_id": c.bidder_id,
+                "suspected_price": float(c.suspected_price),
+                "threshold_price": float(c.threshold_price),
+                "status": c.status,
+                "response_content": c.response_content,
+                "review_remark": c.review_remark,
+                "deadline": c.deadline,
+                "response_at": c.response_at,
+                "reviewed_at": c.reviewed_at,
+            }
+            for c in clarifications
+        ],
         "winner": (
             {
                 "id": w.id,
